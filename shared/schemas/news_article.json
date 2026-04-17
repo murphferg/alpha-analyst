@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://alpha-analyst/schemas/news_article.json",
+  "title": "NewsArticle",
+  "description": "A financial news article fetched by the Ingestion service.",
+  "type": "object",
+  "required": ["id", "title", "source", "url", "published_at", "fetched_at"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier (UUID v4)."
+    },
+    "title": {
+      "type": "string",
+      "description": "Article headline.",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string",
+      "description": "Name of the news outlet (e.g. Reuters, Bloomberg)."
+    },
+    "author": {
+      "type": ["string", "null"],
+      "description": "Author name, if available."
+    },
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Canonical URL of the article."
+    },
+    "summary": {
+      "type": ["string", "null"],
+      "description": "Short description / lead paragraph."
+    },
+    "content": {
+      "type": ["string", "null"],
+      "description": "Full article text (may be truncated by the source API)."
+    },
+    "published_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC publication timestamp."
+    },
+    "fetched_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp when this record was fetched by the ingestion service."
+    },
+    "tickers": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Equity tickers mentioned in or associated with this article."
+    }
+  },
+  "additionalProperties": false
+}
