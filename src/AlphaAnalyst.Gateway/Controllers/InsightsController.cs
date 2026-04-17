@@ -1,5 +1,6 @@
 using AlphaAnalyst.Gateway.Models;
 using Microsoft.AspNetCore.Mvc;
+using System.Text.RegularExpressions;
 
 namespace AlphaAnalyst.Gateway.Controllers;
 
@@ -14,6 +15,9 @@ public class InsightsController : ControllerBase
     private readonly ILogger<InsightsController> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
+
+    // Valid ticker: 1-10 uppercase letters (e.g. AAPL, BRK.B).
+    private static readonly Regex TickerRegex = new(@"^[A-Z0-9.\-]{1,10}$", RegexOptions.Compiled);
 
     public InsightsController(
         ILogger<InsightsController> logger,
@@ -43,6 +47,10 @@ public class InsightsController : ControllerBase
             return BadRequest("Ticker symbol is required.");
 
         ticker = ticker.ToUpperInvariant();
+
+        if (!TickerRegex.IsMatch(ticker))
+            return BadRequest("Invalid ticker symbol.");
+
         _logger.LogInformation("Fetching insights for {Ticker}", ticker);
 
         try
@@ -95,6 +103,10 @@ public class InsightsController : ControllerBase
             return BadRequest("Ticker symbol is required.");
 
         ticker = ticker.ToUpperInvariant();
+
+        if (!TickerRegex.IsMatch(ticker))
+            return BadRequest("Invalid ticker symbol.");
+
         _logger.LogInformation("Triggering synthesis for {Ticker}", ticker);
 
         try
