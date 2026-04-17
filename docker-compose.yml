@@ -1,0 +1,105 @@
+version: "3.9"
+
+# =============================================================================
+# Alpha Analyst — Local Full-Stack Docker Compose
+#
+# Services:
+#   ingestion   — C# .NET background service (SEC + News fetchers)
+#   rag-hub     — Python FastAPI RAG service (agents + chains + eval)
+#   gateway     — C# .NET Web API (Insights + Audit endpoints)
+#   azurite     — Local Azure Storage / Service Bus emulator
+#   cosmosdb    — Local Cosmos DB emulator
+#
+# Usage:
+#   docker compose up --build
+#   API docs: http://localhost:5000/openapi/v1.json
+#   RAG Hub : http://localhost:8000/docs
+# =============================================================================
+
+services:
+
+  # ── Ingestion Service ───────────────────────────────────────────────────────
+  ingestion:
+    build:
+      context: ./src/AlphaAnalyst.Ingestion
+      dockerfile: Dockerfile
+    environment:
+      - DOTNET_ENVIRONMENT=Development
+      - SecFiling__PollingIntervalSeconds=300
+      - News__ApiKey=${NEWS_API_KEY:-}
+      - News__Tickers__0=AAPL
+      - News__Tickers__1=MSFT
+      - News__Tickers__2=GOOGL
+    depends_on:
+      - azurite
+    restart: unless-stopped
+    networks:
+      - alpha-net
+
+  # ── RAG Hub ─────────────────────────────────────────────────────────────────
+  rag-hub:
+    build:
+      context: ./src/alpha_analyst_rag_hub
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - LLM_BACKEND=${LLM_BACKEND:-stub}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+    restart: unless-stopped
+    networks:
+      - alpha-net
+
+  # ── Gateway API ─────────────────────────────────────────────────────────────
+  gateway:
+    build:
+      context: ./src/AlphaAnalyst.Gateway
+      dockerfile: Dockerfile
+    ports:
+      - "5000:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_HTTP_PORTS=8080
+      - RagHub__BaseUrl=http://rag-hub:8000
+    depends_on:
+      - rag-hub
+    restart: unless-stopped
+    networks:
+      - alpha-net
+
+  # ── Azurite (Azure Storage emulator) ─────────────────────────────────────────
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    ports:
+      - "10000:10000"  # Blob
+      - "10001:10001"  # Queue
+      - "10002:10002"  # Table
+    volumes:
+      - azurite-data:/data
+    restart: unless-stopped
+    networks:
+      - alpha-net
+
+  # ── Azure Cosmos DB Emulator ──────────────────────────────────────────────────
+  cosmosdb:
+    image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+    ports:
+      - "8081:8081"
+      - "10251-10254:10251-10254"
+    environment:
+      - AZURE_COSMOS_EMULATOR_PARTITION_COUNT=10
+      - AZURE_COSMOS_EMULATOR_ENABLE_DATA_PERSISTENCE=true
+    volumes:
+      - cosmos-data:/tmp/cosmos/appdata
+    restart: unless-stopped
+    networks:
+      - alpha-net
+
+volumes:
+  azurite-data:
+  cosmos-data:
+
+networks:
+  alpha-net:
+    driver: bridge

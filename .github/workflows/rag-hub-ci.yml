@@ -1,0 +1,48 @@
+name: RAG Hub CI
+
+on:
+  push:
+    branches: [main, "copilot/**"]
+    paths:
+      - "src/alpha_analyst_rag_hub/**"
+      - ".github/workflows/rag-hub-ci.yml"
+  pull_request:
+    paths:
+      - "src/alpha_analyst_rag_hub/**"
+      - ".github/workflows/rag-hub-ci.yml"
+
+jobs:
+  lint-and-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: src/alpha_analyst_rag_hub
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pip install poetry==1.8.3
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-ansi
+
+      - name: Lint (ruff)
+        run: poetry run ruff check .
+
+      - name: Type check (mypy)
+        run: poetry run mypy . --ignore-missing-imports
+        continue-on-error: true
+
+      - name: Run tests
+        run: poetry run pytest tests/ -v --tb=short
+        if: ${{ hashFiles('src/alpha_analyst_rag_hub/tests/**') != '' }}

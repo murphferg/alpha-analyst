@@ -1,0 +1,43 @@
+[tool.poetry]
+name = "alpha-analyst-rag-hub"
+version = "0.1.0"
+description = "RAG-powered analysis hub for Alpha Analyst – orchestrates News, SEC, and Synthesis agents using LangChain."
+authors = ["Alpha Analyst Team"]
+readme = "README.md"
+packages = [{ include = "alpha_analyst_rag_hub", from = "." }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.115.0"
+uvicorn = { version = "^0.30.0", extras = ["standard"] }
+langchain = "^0.3.0"
+langchain-openai = "^0.2.0"
+langchain-community = "^0.3.0"
+openai = "^1.50.0"
+pydantic = "^2.8.0"
+python-dotenv = "^1.0.0"
+httpx = "^0.27.0"
+ragas = "^0.2.0"
+datasets = "^2.20.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.0"
+pytest-asyncio = "^0.24.0"
+ruff = "^0.6.0"
+mypy = "^1.11.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+strict = false

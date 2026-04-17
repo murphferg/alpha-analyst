@@ -1,0 +1,46 @@
+name: Gateway CI
+
+on:
+  push:
+    branches: [main, "copilot/**"]
+    paths:
+      - "src/AlphaAnalyst.Gateway/**"
+      - ".github/workflows/gateway-ci.yml"
+  pull_request:
+    paths:
+      - "src/AlphaAnalyst.Gateway/**"
+      - ".github/workflows/gateway-ci.yml"
+
+env:
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  DOTNET_NOLOGO: true
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.x"
+
+      - name: Restore dependencies
+        run: dotnet restore src/AlphaAnalyst.Gateway/AlphaAnalyst.Gateway.csproj
+
+      - name: Build
+        run: dotnet build src/AlphaAnalyst.Gateway/AlphaAnalyst.Gateway.csproj
+          --no-restore
+          --configuration Release
+
+      - name: Publish
+        run: dotnet publish src/AlphaAnalyst.Gateway/AlphaAnalyst.Gateway.csproj
+          --no-build
+          --configuration Release
+          --output ./publish/gateway

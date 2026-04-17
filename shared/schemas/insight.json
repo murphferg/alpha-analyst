@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://alpha-analyst/schemas/insight.json",
+  "title": "Insight",
+  "description": "An AI-generated investment insight produced by the RAG Hub synthesis agent.",
+  "type": "object",
+  "required": ["id", "ticker", "type", "summary", "confidence_score", "generated_at"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for the insight."
+    },
+    "ticker": {
+      "type": "string",
+      "description": "Equity ticker symbol (e.g. AAPL).",
+      "minLength": 1,
+      "maxLength": 10
+    },
+    "type": {
+      "type": "string",
+      "enum": ["Fundamental", "Sentiment", "TechnicalRisk"],
+      "description": "Category of insight."
+    },
+    "summary": {
+      "type": "string",
+      "description": "One-sentence summary of the insight.",
+      "minLength": 1
+    },
+    "detailed_analysis": {
+      "type": ["string", "null"],
+      "description": "Extended analysis supporting the summary."
+    },
+    "confidence_score": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "LLM-reported confidence (0 = none, 1 = certain)."
+    },
+    "sources": {
+      "type": "array",
+      "items": { "type": "string", "format": "uri" },
+      "description": "Source document URLs used to generate this insight."
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp when the insight was generated."
+    }
+  },
+  "additionalProperties": false
+}
