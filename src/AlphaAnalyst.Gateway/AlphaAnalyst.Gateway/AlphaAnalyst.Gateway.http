@@ -1,0 +1,6 @@
+@AlphaAnalyst.Gateway_HostAddress = http://localhost:5082
+
+GET {{AlphaAnalyst.Gateway_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
