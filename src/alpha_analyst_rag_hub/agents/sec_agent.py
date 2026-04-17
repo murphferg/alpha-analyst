@@ -6,7 +6,7 @@ search API and converts them to :class:`Document` objects.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -38,7 +38,7 @@ class SecAgent:
         form types and date range.
         """
         documents: list[Document] = []
-        start_dt = datetime.utcnow() - timedelta(days=self._lookback_days)
+        start_dt = datetime.now(timezone.utc) - timedelta(days=self._lookback_days)
 
         headers = {"User-Agent": self._user_agent}
 
@@ -61,7 +61,7 @@ class SecAgent:
             "q": f'"{ticker}"',
             "dateRange": "custom",
             "startdt": start_dt.strftime("%Y-%m-%d"),
-            "enddt": datetime.utcnow().strftime("%Y-%m-%d"),
+            "enddt": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "forms": form_type,
         }
 
@@ -113,7 +113,7 @@ def _parse_date(value: str | None) -> datetime | None:
         return None
     for fmt in ("%Y-%m-%d", "%Y%m%d"):
         try:
-            return datetime.strptime(value, fmt)
+            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             continue
     return None

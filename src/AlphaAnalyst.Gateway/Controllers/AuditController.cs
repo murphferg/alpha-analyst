@@ -1,5 +1,6 @@
 using AlphaAnalyst.Gateway.Models;
 using Microsoft.AspNetCore.Mvc;
+using System.Text.RegularExpressions;
 
 namespace AlphaAnalyst.Gateway.Controllers;
 
@@ -13,6 +14,9 @@ public class AuditController : ControllerBase
 {
     private readonly ILogger<AuditController> _logger;
     private readonly IConfiguration _configuration;
+
+    // Strip control characters (e.g. CR/LF) to prevent log injection.
+    private static readonly Regex ControlCharsRegex = new(@"[\r\n\t\x00-\x1f\x7f]", RegexOptions.Compiled);
 
     public AuditController(
         ILogger<AuditController> logger,
@@ -39,9 +43,13 @@ public class AuditController : ControllerBase
     {
         limit = Math.Clamp(limit == 0 ? 50 : limit, 1, 200);
 
+        // Sanitize user-supplied strings before logging to prevent log injection.
+        var safeUserId = Sanitize(userId);
+        var safeResource = Sanitize(resource);
+
         _logger.LogInformation(
             "Audit query: userId={UserId} resource={Resource} limit={Limit}",
-            userId, resource, limit);
+            safeUserId, safeResource, limit);
 
         // TODO: replace stub with actual persistence query (e.g. CosmosDB / SQL).
         var stub = Enumerable.Range(1, Math.Min(limit, 5)).Select(i => new AuditEntry
@@ -67,9 +75,12 @@ public class AuditController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult<AuditEntry> GetById(string id)
     {
-        _logger.LogInformation("Fetching audit entry {Id}", id);
+        _logger.LogInformation("Fetching audit entry {Id}", Sanitize(id));
 
         // TODO: replace with actual lookup.
-        return NotFound($"Audit entry '{id}' not found.");
+        return NotFound($"Audit entry not found.");
     }
+
+    private static string? Sanitize(string? value) =>
+        value is null ? null : ControlCharsRegex.Replace(value, "_");
 }

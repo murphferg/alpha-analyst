@@ -8,7 +8,7 @@ the stub below illustrates the contract the rest of the system depends on.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -41,7 +41,7 @@ class NewsAgent:
             )
             return []
 
-        from_dt = datetime.utcnow() - timedelta(hours=self._lookback_hours)
+        from_dt = datetime.now(timezone.utc) - timedelta(hours=self._lookback_hours)
 
         params = {
             "q": ticker,
@@ -83,6 +83,6 @@ def _parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.rstrip("Z"))
+        return datetime.fromisoformat(value.rstrip("Z")).replace(tzinfo=timezone.utc)
     except ValueError:
         return None

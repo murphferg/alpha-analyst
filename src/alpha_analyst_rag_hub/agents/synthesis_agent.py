@@ -6,7 +6,7 @@ generation (RAG) chain to produce structured investment insights.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from models import Document, Insight
 from chains.retrieval_chain import RetrievalChain
@@ -92,5 +92,5 @@ class SynthesisAgent:
             detailed_analysis=result.get("detailed_analysis"),
             confidence_score=float(result.get("confidence_score", 0.0)),
             sources=[doc.url for doc in documents if doc.url],
-            generated_at=datetime.utcnow(),
+            generated_at=datetime.now(timezone.utc),
         )

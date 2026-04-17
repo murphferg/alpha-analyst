@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -31,4 +31,4 @@ class Insight(BaseModel):
     detailed_analysis: str | None = None
     confidence_score: float = Field(ge=0.0, le=1.0, default=0.0)
     sources: list[str] = Field(default_factory=list)
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
