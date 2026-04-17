@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AlphaAnalyst.Gateway/AlphaAnalyst.Gateway.csproj" />
+    <Project Path="src/AlphaAnalyst.Ingestion/AlphaAnalyst.Ingestion.csproj" />
+  </Folder>
+</Solution>
