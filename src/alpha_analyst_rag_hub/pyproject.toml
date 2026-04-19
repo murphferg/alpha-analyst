@@ -1,0 +1,24 @@
+[project]
+name = "alpha-analyst-rag-hub"
+version = "0.1.0"
+description = "Multi-agent financial research system hub"
+authors = [{name = "Kevin Murphy-Ferguson"}]
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "azure-search-documents",
+    "openai",
+    "ragas",
+    "agent-framework-openai (>=1.0.1,<2.0.0)",
+    "agent-framework-azure-ai (>=1.0.0rc6,<2.0.0)",
+    "agent-framework (>=1.0.1,<2.0.0)",
+    "sec-edgar-downloader (>=5.1.0,<6.0.0)",
+    "azure-identity (>=1.25.3,<2.0.0)"
+]
+
+[tool.poetry]
+# This tells Poetry 2.0 NOT to look for a src/alpha_analyst_rag_hub folder
+package-mode = false
+
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"
