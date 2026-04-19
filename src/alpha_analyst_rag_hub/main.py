@@ -1,119 +1,107 @@
 import asyncio
 import os
+from typing import Annotated
+from xmlrpc import client
+from pydantic import Field
 from dotenv import load_dotenv
 
+# Microsoft Agent Framework 1.0 GA Standard Imports
 from agent_framework import Agent, tool
 from agent_framework.openai import OpenAIChatClient
-
-
-from typing import Annotated
-from pydantic import Field
-
-
-from sec_edgar_downloader import Downloader
-import os
-
-# Initialize the downloader with your info (SEC requirement)
-# Change the path to where you want the filings to land
-dl = Downloader("AlphaAnalystProject", "kevin.murphy@example.com", "data/sec_filings")
-
-@tool(description="Downloads and retrieves the latest 10-K filing for a company.")
-def get_sec_filings(
-    ticker: Annotated[str, Field(description="The stock ticker symbol (e.g., 'AAPL')")]
-) -> str:
-    """Downloads the latest 10-K and returns a confirmation path."""
-    try:
-        # Download the latest 10-K
-        dl.get("10-K", ticker, limit=1, download_details=True)
-        
-        # Construct the expected path (sec-edgar-downloader uses a specific structure)
-        base_path = f"data/sec_filings/sec-edgar-filings/{ticker}/10-K"
-        
-        # Find the latest accession number folder
-        folders = sorted(os.listdir(base_path), reverse=True)
-        if not folders:
-            return f"No filings found for {ticker}."
-            
-        full_path = os.path.join(base_path, folders[0], "full-submission.txt")
-        
-        return f"Successfully downloaded the latest 10-K for {ticker}. File saved to: {full_path}"
-    except Exception as e:
-        return f"Error fetching filings for {ticker}: {str(e)}"
-    
-
 from azure.search.documents import SearchClient
 from azure.core.credentials import AzureKeyCredential
+from sec_edgar_downloader import Downloader
 
-@tool(description="Searches the indexed SEC filings for specific financial insights.")
-def search_sec_filings(
-    query: Annotated[str, Field(description="The question about company financials")],
+# Load environment variables
+load_dotenv()
+
+# --- 1. TOOL DEFINITIONS ---
+
+@tool(description="Downloads the latest 10-K filing for a company to local storage.")
+def download_sec_filing(
     ticker: Annotated[str, Field(description="The stock ticker symbol (e.g., 'TSLA')")]
 ) -> str:
-    # 1. Standardize casing
-    clean_ticker = ticker.upper().strip()
+    """Uses sec-edgar-downloader to fetch filings for analysis."""
+    # Ensure local directory exists
+    email = "kevin.murphy@example.com" # Replace with your real email for SEC compliance
+    dl = Downloader("AlphaAnalystProject", email, "data/sec_filings")
     
-    # 2. Search logic
+    try:
+        dl.get("10-K", ticker.upper(), limit=1)
+        return f"Successfully downloaded the latest 10-K for {ticker.upper()} to data/sec_filings."
+    except Exception as e:
+        return f"Error downloading filing for {ticker}: {str(e)}"
+
+@tool(description="Searches the indexed SEC research database for specific financial facts.")
+def search_sec_index(
+    query: Annotated[str, Field(description="The specific question about financials")],
+    ticker: Annotated[str, Field(description="The stock ticker (e.g., 'TSLA')")]
+) -> str:
+    """Queries the Azure AI Search vector index for context."""
     client = SearchClient(
         endpoint=os.getenv("AZURE_AI_SEARCH_ENDPOINT"),
         index_name="alpha-analyst-sec-index",
         credential=AzureKeyCredential(os.getenv("AZURE_AI_SEARCH_KEY"))
     )
     
-    # 3. Add count=True to debug if any docs exist
-    results = client.search(
-        search_text=query, 
-        filter=f"ticker eq '{clean_ticker}'", 
-        top=3
-    )
+    clean_ticker = ticker.upper().strip()
+    results = client.search(search_text=query, filter=f"ticker eq '{clean_ticker}'", top=3)
     
     context = "\n".join([r['content'] for r in results])
-    return f"Relevant excerpts from the {clean_ticker} 10-K:\n{context}" if context else f"No matching data found for ticker '{clean_ticker}'."
+    return f"Excerpts from {clean_ticker} index:\n{context}" if context else "No indexed data found."
 
-load_dotenv()
+# --- 2. AGENT DEFINITIONS ---
 
 async def main():
-    # 1. Initialize the Chat Client for the /v1 path
-    # If your URL ends in /openai/v1, use base_url and REMOVE api_version
+    # Initialize the high-performance /v1 Client
     client = OpenAIChatClient(
-        base_url=os.getenv("AZURE_OPENAI_ENDPOINT"), # Use base_url for /v1 paths
+        base_url=os.getenv("AZURE_OPENAI_ENDPOINT"), # Ends in /openai/v1
         api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-        model=os.getenv("AZURE_OPENAI_MODEL")        # Your deployment name
+        model=os.getenv("AZURE_OPENAI_MODEL")        # Deployment name
     )
 
-    # 2. Define the News Agent
+    # Specialist 1: Financial Data & SEC Filings
+    sec_agent = Agent(
+        name="SECAgent",
+        instructions="Expert in SEC filings. Use 'download_sec_filing' for new data and 'search_sec_index' for existing data.",
+        client=client,
+        tools=[download_sec_filing, search_sec_index]
+    )
+
+    # Specialist 2: News & Sentiment
     news_agent = Agent(
         name="NewsAgent",
-        instructions="You are a financial news analyst. Keep your responses concise.",
+        instructions="Real-time news analyst. Keep responses concise and focused on market impact.",
         client=client
     )
 
-    # 2a. Run a test query
-    print("--- Alpha Analyst: News Agent Test ---")
-    try:
-        # The .run() method is the standard entry point for Agent
-        response = await news_agent.run("What is the current market sentiment for renewable energy stocks?")
-        print(f"Agent Response: {response.text}")
-    except Exception as e:
-        print(f"Error detail: {e}")
-
-    # 3. Define the SEC Filings Agent
-    sec_agent = Agent(
-        name="SECAgent",
+    # The Supervisor: Coordinates the specialists
+    lead_analyst = Agent(
+        name="LeadAnalyst",
         instructions=(
-            "You are an expert financial analyst. Use 'get_sec_filings' to download new data "
-            "and 'search_sec_filings' to query the research index for specific insights."
+            "You are the Lead Investment Analyst. Delegate to 'SECAgent' for historical filings "
+            "and 'NewsAgent' for headlines. Synthesize their findings into a final thesis."
         ),
         client=client,
-        tools=[get_sec_filings, search_sec_filings]
+        # 🏆 FIX: Use .as_tool() to make the agents serializable
+        tools=[
+            sec_agent.as_tool(), 
+            news_agent.as_tool()
+        ] 
     )
 
-    # 3a. Test SEC Filings Agent
-    print("--- Alpha Analyst: Production RAG Test ---")
-    # This query forces the agent to use the search tool against your Azure index
-    query = "Search the research index for the 'TSLA' ticker and tell me what content is stored there."
-    response = await sec_agent.run(query)
+    # --- 3. EXECUTION ---
+    print("--- 🏆 Alpha Analyst: Production Multi-Agent Run ---")
     
-    print(f"\nSEC Agent Response:\n{response.text}")
+    user_query = (
+        "Is Tesla's (TSLA) current news sentiment consistent with the "
+        "risk factors listed in their latest indexed 10-K?"
+    )
+
+    # The LeadAnalyst orchestrates the specialists automatically
+    response = await lead_analyst.run(user_query)
+    
+    print(f"\nFINAL ANALYSIS:\n{response.text}")
 
 if __name__ == "__main__":
     asyncio.run(main())
