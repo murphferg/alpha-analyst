@@ -54,3 +54,7 @@ TestResult.xml
 nunit-*.xml
 
 .env
+*.env
+src/alpha_analyst_rag_hub/.env
+
+.DS_Store

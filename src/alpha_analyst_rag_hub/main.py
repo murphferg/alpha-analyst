@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 # Microsoft Agent Framework 1.0 GA Standard Imports
 from agent_framework import Agent, tool
 from agent_framework.openai import OpenAIChatClient
+from agent_framework.orchestrations import SequentialBuilder
 from azure.search.documents import SearchClient
 from azure.search.documents.models import VectorizedQuery
 from azure.core.credentials import AzureKeyCredential
@@ -34,47 +35,49 @@ def download_sec_filing(
         return f"Error downloading filing for {ticker}: {str(e)}"
 
 
-@tool(description="Performs a hybrid search (vector + keyword) for high-precision financial data.")
-def search_sec_index(
-    query: Annotated[str, Field(description="The question about financials")],
-    ticker: Annotated[str, Field(description="The stock ticker (e.g., 'TSLA')")]
-) -> str:
-    # 1. Generate the embedding for the query
-    embedding_response = aoai_client.embeddings.create(
-        input=query,
-        model="text-embedding-3-small"
-    )
-    query_vector = embedding_response.data[0].embedding
+@tool(description="Search SEC filings for financial tables.")
+def search_sec_index(query: str, ticker: str) -> str:
+    print(f"🔍 [AGENT CALL]: Searching {ticker} for '{query}'...")
+    
+    try:
+        # (Existing search logic...)
+        results = client.search(
+            search_text=query,
+            vector_queries=[vector_query],
+            filter=f"ticker eq '{ticker.upper()}'",
+            query_type="semantic",
+            semantic_configuration_name="alpha-analyst-config",
+            top=10
+        )
 
-    # 2. Setup the Hybrid Query
-    vector_query = VectorizedQuery(
-        vector=query_vector, 
-        k_nearest_neighbors=3, 
-        fields="contentVector"
-    )
+        chunks = [r['content'] for r in results]
+        
+        if not chunks:
+            # 🏆 FALLBACK: If semantic fails, try a simple keyword search
+            print(f"⚠️ No semantic results for '{query}'. Trying keyword fallback...")
+            results = client.search(
+                search_text=query,
+                filter=f"ticker eq '{ticker.upper()}'",
+                top=5
+            )
+            chunks = [r['content'] for r in results]
 
-    client = SearchClient(
-        endpoint=os.getenv("AZURE_AI_SEARCH_ENDPOINT"),
-        index_name="alpha-analyst-sec-index",
-        credential=AzureKeyCredential(os.getenv("AZURE_AI_SEARCH_KEY"))
-    )
+        if not chunks:
+            return f"SYSTEM ERROR: No data found in index for ticker {ticker.upper()} with query '{query}'."
+            
+        return "\n\n---\n\n".join(chunks)
 
-    # 3. Execute Hybrid + Semantic Search
-    results = client.search(
-        search_text=query,             # The Keyword Path
-        vector_queries=[vector_query], # The Vector Path
-        filter=f"ticker eq '{ticker.upper()}'",
-        query_type="semantic",         # Enable the L2 Ranker
-        semantic_configuration_name="alpha-analyst-config",
-        top=3
-    )
-
-    context = "\n".join([r['content'] for r in results])
-    return f"High-precision data for {ticker.upper()}:\n{context}" if context else "No data found."
-
+    except Exception as e:
+            # 🏆 THE SMOKING GUN: Print this to your VS Code terminal
+            print(f"❌ AZURE SEARCH ERROR: {str(e)}")
+            return f"TOOL ERROR: {str(e)}"            
+    
 # --- 2. AGENT DEFINITIONS ---
 
 async def main():
+
+    query = "Analyze Tesla (TSLA) based on indexed risk factors and provide an investment thesis."
+
     # Initialize the high-performance /v1 Client
     client = OpenAIChatClient(
         base_url=os.getenv("AZURE_OPENAI_ENDPOINT"), # Ends in /openai/v1
@@ -107,28 +110,76 @@ async def main():
     lead_analyst = Agent(
         name="LeadAnalyst",
         instructions=(
-            "You are the Lead Analyst. Your specialists (SECAgent and NewsAgent) have "
-            "access to real-time data tools. If they say they have 'limitations', "
-            "order them to try their specific search tools again. Do not provide a "
-            "final analysis until you have data from BOTH agents."
+            "You are a Senior Investment Researcher. You are forbidden from using your own memory. "
+            "MISSION: You must find 4 specific metrics: GAAP Income, Cash, Auto Revenue, and Energy Revenue. \n\n"
+            "EXECUTION PLAN:\n"
+            "1. CALL 'search_sec_index' for 'Consolidated Statements of Operations' to find Income.\n"
+            "2. CALL 'search_sec_index' for 'Consolidated Balance Sheets' to find Cash.\n"
+            "3. CALL 'search_sec_index' for 'Segment Revenue' to find Auto/Energy splits.\n"
+            "4. If a search returns SEC headers/boilerplate, RE-SEARCH using more specific terms like 'Table: Operating Income'.\n\n"
+            "Only after you have the numbers, synthesize the Investment Thesis. "
+            "If you fail to find a number, explicitly state: 'DATA NOT FOUND IN INDEX' so the Auditor can see the gap."
         ),
         client=client,
-        tools=[sec_agent.as_tool(), news_agent.as_tool()]
+        tools=[search_sec_index]
     )
 
-    # --- 3. EXECUTION ---
-    print("--- 🏆 Alpha Analyst: Production Multi-Agent Run ---")
+    # The Reviewer: A critical auditor to check the final analysis
+    reviewer = Agent(
+    name="Reviewer",
+    instructions=(
+        "You are a cynical Senior Investment Auditor. Your goal is to find errors. "
+        "Review the provided analysis for: \n"
+        "1. Missing Citations: Every financial claim must cite a 10-K section.\n"
+        "2. Hallucinations: Does the news sentiment actually contradict the filing?\n"
+        "3. Logic Gaps: Are the conclusions too optimistic?\n"
+        "If the analysis is weak, provide a list of 'Action Items' for the Analyst."
+    ),
+    client=client
+)
+
+# --- 3. THE WORKFLOW ---
     
-    user_query = (
-        "Is Tesla's (TSLA) current news sentiment consistent with the "
-        "risk factors listed in their latest indexed 10-K?"
+    # SequentialBuilder connects Analyst -> Reviewer
+    workflow = (
+        SequentialBuilder(participants=[lead_analyst, reviewer])
+        .build()
     )
 
-    # The LeadAnalyst orchestrates the specialists automatically
-    response = await lead_analyst.run(user_query)
-    
-    print(f"\nFINAL ANALYSIS:\n{response.text}")
+    print("--- 🧐 Alpha Analyst: Sequential Audit Workflow Starting ---")
+    # --- 🛠️ DEBUG: Aggregating all outputs into final_messages ---
+    run_result = await workflow.run(query)
 
+    final_messages = []
+    outputs = run_result.get_outputs()
+
+    for final_output in outputs:
+        # In Sequential workflows, each participant returns their message history
+        if isinstance(final_output, list):
+            for msg in final_output:
+                final_messages.append(msg)
+        else:
+            # Fallback for single-message responses
+            final_messages.append(final_output)
+
+    # --- 🔦 INSPECTION PRINT ---
+    print("\n" + "="*50)
+    print("--- 🔬 ALPHA ANALYST: FULL CONVERSATION TRACE ---")
+    print("="*50)
+
+    for i, msg in enumerate(final_messages):
+        role = getattr(msg, 'role', 'unknown').upper()
+        name = getattr(msg, 'name', 'System')
+        
+        # 🏆 FIX: Specifically check for Tool/Function outputs
+        if role == "TOOL":
+            # Tool outputs are often in .content or .text depending on the wrapper
+            content = getattr(msg, 'content', getattr(msg, 'text', "[[ EMPTY TOOL RESULT ]]"))
+        else:
+            content = getattr(msg, 'text', str(msg))
+        
+        print(f"[{i}] {role} - {name}:\n{content}\n" + "-"*30)
+
+    print("--- END OF TRACE ---\n")
 if __name__ == "__main__":
     asyncio.run(main())
-    
