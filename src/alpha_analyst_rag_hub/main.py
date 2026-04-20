@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from agent_framework import Agent, tool
 from agent_framework.openai import OpenAIChatClient
 from azure.search.documents import SearchClient
+from azure.search.documents.models import VectorizedQuery
 from azure.core.credentials import AzureKeyCredential
 from sec_edgar_downloader import Downloader
 
@@ -32,23 +33,44 @@ def download_sec_filing(
     except Exception as e:
         return f"Error downloading filing for {ticker}: {str(e)}"
 
-@tool(description="Searches the indexed SEC research database for specific financial facts.")
+
+@tool(description="Performs a hybrid search (vector + keyword) for high-precision financial data.")
 def search_sec_index(
-    query: Annotated[str, Field(description="The specific question about financials")],
+    query: Annotated[str, Field(description="The question about financials")],
     ticker: Annotated[str, Field(description="The stock ticker (e.g., 'TSLA')")]
 ) -> str:
-    """Queries the Azure AI Search vector index for context."""
+    # 1. Generate the embedding for the query
+    embedding_response = aoai_client.embeddings.create(
+        input=query,
+        model="text-embedding-3-small"
+    )
+    query_vector = embedding_response.data[0].embedding
+
+    # 2. Setup the Hybrid Query
+    vector_query = VectorizedQuery(
+        vector=query_vector, 
+        k_nearest_neighbors=3, 
+        fields="contentVector"
+    )
+
     client = SearchClient(
         endpoint=os.getenv("AZURE_AI_SEARCH_ENDPOINT"),
         index_name="alpha-analyst-sec-index",
         credential=AzureKeyCredential(os.getenv("AZURE_AI_SEARCH_KEY"))
     )
-    
-    clean_ticker = ticker.upper().strip()
-    results = client.search(search_text=query, filter=f"ticker eq '{clean_ticker}'", top=3)
-    
+
+    # 3. Execute Hybrid + Semantic Search
+    results = client.search(
+        search_text=query,             # The Keyword Path
+        vector_queries=[vector_query], # The Vector Path
+        filter=f"ticker eq '{ticker.upper()}'",
+        query_type="semantic",         # Enable the L2 Ranker
+        semantic_configuration_name="alpha-analyst-config",
+        top=3
+    )
+
     context = "\n".join([r['content'] for r in results])
-    return f"Excerpts from {clean_ticker} index:\n{context}" if context else "No indexed data found."
+    return f"High-precision data for {ticker.upper()}:\n{context}" if context else "No data found."
 
 # --- 2. AGENT DEFINITIONS ---
 
@@ -63,7 +85,12 @@ async def main():
     # Specialist 1: Financial Data & SEC Filings
     sec_agent = Agent(
         name="SECAgent",
-        instructions="Expert in SEC filings. Use 'download_sec_filing' for new data and 'search_sec_index' for existing data.",
+        # 🏆 FIX: Explicitly command the agent to use its tools
+        instructions=(
+            "You are an SEC Specialist. When asked about a company, you MUST FIRST use "
+            "'search_sec_index' to look for data. If nothing is found, use 'download_sec_filing'. "
+            "Do not apologize; simply execute the tools and report the findings."
+        ),
         client=client,
         tools=[download_sec_filing, search_sec_index]
     )
@@ -71,7 +98,8 @@ async def main():
     # Specialist 2: News & Sentiment
     news_agent = Agent(
         name="NewsAgent",
-        instructions="Real-time news analyst. Keep responses concise and focused on market impact.",
+        # 🏆 FIX: Give it a baseline tool or clear role
+        instructions="You are a News Analyst. Search for the latest headlines regarding the ticker provided.",
         client=client
     )
 
@@ -79,15 +107,13 @@ async def main():
     lead_analyst = Agent(
         name="LeadAnalyst",
         instructions=(
-            "You are the Lead Investment Analyst. Delegate to 'SECAgent' for historical filings "
-            "and 'NewsAgent' for headlines. Synthesize their findings into a final thesis."
+            "You are the Lead Analyst. Your specialists (SECAgent and NewsAgent) have "
+            "access to real-time data tools. If they say they have 'limitations', "
+            "order them to try their specific search tools again. Do not provide a "
+            "final analysis until you have data from BOTH agents."
         ),
         client=client,
-        # 🏆 FIX: Use .as_tool() to make the agents serializable
-        tools=[
-            sec_agent.as_tool(), 
-            news_agent.as_tool()
-        ] 
+        tools=[sec_agent.as_tool(), news_agent.as_tool()]
     )
 
     # --- 3. EXECUTION ---
@@ -105,3 +131,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
