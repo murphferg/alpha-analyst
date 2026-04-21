@@ -71,7 +71,12 @@ lead_analyst = project_client.agents.create_version(
     agent_name="LeadAnalyst",
     definition=PromptAgentDefinition(
         model=os.getenv("AZURE_OPENAI_MODEL"),
-        instructions="Researcher: Find GAAP Income, Cash, and Revenue. Cite everything.",
+        instructions=(
+            "You are the lead financial analyst. Build the final investment report by combining "
+            "(1) SEC filing evidence and (2) external news context provided in the user prompt. "
+            "Before finalizing, call search_sec_index to verify key financial claims from filings. "
+            "Output sections: SEC Evidence, News Evidence, Integrated Analysis, and Final Verdict."
+        ),
         tools=[
             FunctionTool(
                 name="search_sec_index",
@@ -122,13 +127,25 @@ def run_alpha_audit(ticker: str):
     print(f"\n--- 🧐 Alpha Analyst Audit: {ticker.upper()} ---")
     
     with project_client.get_openai_client() as openai_client:
-        for agent in [lead_analyst, news_agent, auditor]:
+        def extract_response_text(response) -> str:
+            if getattr(response, "output_text", None):
+                return response.output_text
+
+            parts = []
+            for item in (getattr(response, "output", None) or []):
+                for content in (getattr(item, "content", None) or []):
+                    text_value = getattr(content, "text", None)
+                    if text_value:
+                        parts.append(text_value)
+            return "\n".join(parts).strip()
+
+        def invoke_agent(agent, user_prompt: str) -> str:
             print(f"▶️  Invoking: {agent.name}...")
 
             conversation = openai_client.conversations.create(
-                items=[{"role": "user", "content": f"Perform a comprehensive audit of {ticker}."}]
+                items=[{"role": "user", "content": user_prompt}]
             )
-            
+
             response = openai_client.responses.create(
                 conversation=conversation.id,
                 extra_body={
@@ -136,7 +153,6 @@ def run_alpha_audit(ticker: str):
                 }
             )
 
-            # Polling for Tool Calls (The RAG & MCP loop)
             while response.status in ["requires_action", "in_progress"]:
                 if response.status == "requires_action":
                     outputs = []
@@ -155,7 +171,6 @@ def run_alpha_audit(ticker: str):
                             res = search_sec_index(query, sec_ticker)
                             outputs.append({"tool_call_id": tc.id, "output": res})
                         else:
-                            # Keep execution moving for non-local tools surfaced as tool calls.
                             outputs.append({
                                 "tool_call_id": tc.id,
                                 "output": f"Tool '{fn_name or 'unknown'}' is not executed by local runner."
@@ -174,14 +189,66 @@ def run_alpha_audit(ticker: str):
                         )
                 else:
                     response = openai_client.responses.get(
-                        conversation=conversation.id, 
+                        conversation=conversation.id,
                         response_id=response.id
                     )
 
-            print(f"[{agent.name}]: {response.output_text[:150]}...")
+            final_text = extract_response_text(response)
+            preview = final_text[:150] if final_text else "(no text output)"
+            print(f"[{agent.name}]: {preview}...")
+            return final_text
 
-        print("\n" + "="*60 + "\n--- 🔬 FINAL AUDITED REPORT ---\n" + "="*60)
-        print(response.output_text)
+        def invoke_model(user_prompt: str) -> str:
+            response = openai_client.responses.create(
+                model=os.getenv("AZURE_OPENAI_MODEL"),
+                input=user_prompt
+            )
+            return extract_response_text(response)
+
+        news_summary = invoke_agent(
+            news_agent,
+            (
+                f"For {ticker}, summarize the most material current news and sentiment signals. "
+                "Focus on drivers that may affect revenue, margin, risk, or valuation."
+            )
+        )
+
+        sec_snapshot = search_sec_index(
+            "GAAP income cash revenue segment revenue risk factors",
+            ticker
+        )
+
+        lead_prompt = (
+            f"Perform a comprehensive audit of {ticker}. Use SEC filing evidence and incorporate "
+            "the following external news summary before generating your report.\n\n"
+            "REQUIRED: Reference both SEC and News in each conclusion.\n"
+            "Output sections: SEC Evidence, News Evidence, Integrated Analysis, Final Verdict.\n\n"
+            f"SEC EVIDENCE SNAPSHOT:\n{sec_snapshot}\n\n"
+            f"NEWS SUMMARY:\n{news_summary}"
+        )
+
+        lead_report = invoke_agent(lead_analyst, lead_prompt)
+
+        if not lead_report.strip():
+            lead_report = invoke_model(
+                "You are the LeadAnalyst. Produce the final report using BOTH SEC and NEWS context below. "
+                "Cite source type per claim (SEC or NEWS).\n\n"
+                f"{lead_prompt}"
+            )
+
+        auditor_report = invoke_agent(
+            auditor,
+            (
+                f"Audit this lead analyst report for citation quality, unsupported claims, and logic gaps.\n\n"
+                f"LEAD REPORT:\n{lead_report}"
+            )
+        )
+
+        print("\n" + "="*60 + "\n--- 🔬 FINAL LEAD ANALYST REPORT ---\n" + "="*60)
+        print(lead_report)
+
+        print("\n" + "="*60 + "\n--- 🧪 AUDITOR REVIEW ---\n" + "="*60)
+        print(auditor_report)
 
 if __name__ == "__main__":
     run_alpha_audit(sys.argv[1] if len(sys.argv) > 1 else "TSLA")
