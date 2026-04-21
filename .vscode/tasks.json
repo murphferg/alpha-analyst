@@ -2,12 +2,65 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "Validate prerequisites",
+      "type": "aitk",
+      "command": "debug-check-prerequisites",
+      "args": {
+        "portOccupancy": [
+          5679,
+          8088
+        ]
+      }
+    },
+    {
+      "label": "Run AgentDev Main",
+      "type": "shell",
+      "command": "${workspaceFolder}/.agentdev-venv/bin/python -m debugpy --listen 127.0.0.1:5679 -m agentdev run ${workspaceFolder}/src/alpha_analyst_rag_hub/main.py --verbose --port 8088 -- TSLA",
+      "isBackground": true,
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": [
+        "Validate prerequisites"
+      ],
+      "problemMatcher": {
+        "pattern": [
+          {
+            "regexp": "^.*$",
+            "file": 0,
+            "location": 1,
+            "message": 2
+          }
+        ],
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*",
+          "endsPattern": "Step Metadata|Alpha Analyst Inspector Workflow"
+        }
+      }
+    },
+    {
       "label": "Open Agent Inspector",
       "type": "shell",
-      "command": "echo '${input:openAgentInspector}'",
+      "command": "echo",
+      "args": [
+        "${input:openAgentInspector}"
+      ],
       "presentation": {
         "reveal": "never"
       },
+      "dependsOn": [
+        "Run AgentDev Main"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Terminate All Tasks",
+      "command": "echo",
+      "args": [
+        "${input:terminate}"
+      ],
+      "type": "shell",
       "problemMatcher": []
     }
   ],
@@ -20,6 +73,12 @@
         "triggeredFrom": "tasks",
         "port": 8088
       }
+    },
+    {
+      "id": "terminate",
+      "type": "command",
+      "command": "workbench.action.tasks.terminate",
+      "args": "terminateAll"
     }
   ]
 }

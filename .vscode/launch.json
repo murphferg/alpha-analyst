@@ -19,18 +19,14 @@
     {
       "name": "Alpha Analyst: Run + Open Agent Inspector",
       "type": "debugpy",
-      "request": "launch",
-      "program": "${workspaceFolder}/src/alpha_analyst_rag_hub/main.py",
-      "cwd": "${workspaceFolder}/src/alpha_analyst_rag_hub",
-      "args": [
-        "TSLA"
-      ],
-      "console": "integratedTerminal",
-      "justMyCode": true,
-      "env": {
-        "PYTHONUNBUFFERED": "1"
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5679
       },
-      "preLaunchTask": "Open Agent Inspector"
+      "preLaunchTask": "Open Agent Inspector",
+      "postDebugTask": "Terminate All Tasks",
+      "internalConsoleOptions": "neverOpen"
     }
   ]
 }
