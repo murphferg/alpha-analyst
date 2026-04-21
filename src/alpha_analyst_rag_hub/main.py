@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import os
 import re
@@ -12,7 +13,6 @@ from dotenv import load_dotenv
 
 from agent_framework import Agent, tool
 from agent_framework.openai import OpenAIChatClient
-from agent_framework.orchestrations import SequentialBuilder
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
 
@@ -92,55 +92,59 @@ def _extract_text(output: object) -> str:
     return str(output)
 
 
-def _event_metadata(event: object, sequence: int, t0: float, executor_starts: dict[str, float]) -> dict:
-    def _safe_attr(obj: object, name: str):
-        try:
-            return getattr(obj, name)
-        except Exception:
-            return None
+async def _run_agent_step(step: int, agent: Agent, prompt: str, t0: float) -> tuple[str, dict]:
+    start = time.perf_counter()
+    print(json.dumps({
+        "step": step,
+        "agent": agent.name,
+        "event_type": "step_started",
+        "elapsed_ms": round((start - t0) * 1000, 2),
+        "prompt_chars": len(prompt),
+    }))
 
-    event_type = str(getattr(event, "type", "unknown"))
-    source_executor = _safe_attr(event, "source_executor_id")
-    now = time.perf_counter()
+    stream = agent.run(prompt, stream=True)
+    output_chunks = 0
+    output_chars = 0
 
-    duration_ms = None
-    if source_executor and event_type == "executor_invoked":
-        executor_starts[source_executor] = now
-    elif source_executor and event_type in {"executor_completed", "executor_failed"}:
-        started = executor_starts.get(source_executor)
-        if started is not None:
-            duration_ms = round((now - started) * 1000, 2)
+    async for chunk in stream:
+        text = getattr(chunk, "text", None)
+        if isinstance(text, str) and text:
+            output_chunks += 1
+            output_chars += len(text)
 
+    response = await stream.get_final_response()
+    text = _extract_text(response)
+
+    end = time.perf_counter()
     metadata = {
-        "seq": sequence,
-        "event_type": event_type,
-        "elapsed_ms": round((now - t0) * 1000, 2),
-        "source_executor_id": source_executor,
-        "request_id": _safe_attr(event, "request_id"),
-        "request_type": str(_safe_attr(event, "request_type") or "") or None,
-        "response_type": str(_safe_attr(event, "response_type") or "") or None,
-        "duration_ms": duration_ms,
+        "step": step,
+        "agent": agent.name,
+        "event_type": "step_completed",
+        "elapsed_ms": round((end - t0) * 1000, 2),
+        "duration_ms": round((end - start) * 1000, 2),
+        "output_chunks": output_chunks,
+        "output_chars": output_chars,
+        "response_chars": len(text),
     }
+    print(json.dumps(metadata))
 
-    if event_type == "request_info":
-        try:
-            metadata["request_info"] = event.to_dict()
-        except Exception:
-            metadata["request_info"] = str(_safe_attr(event, "data"))
-    else:
-        metadata["data"] = str(_safe_attr(event, "data"))
-
-    return metadata
+    return text, metadata
 
 
 async def run_alpha_audit(ticker: str) -> None:
     print(f"\n--- Alpha Analyst Inspector Workflow: {ticker.upper()} ---")
 
-    client = OpenAIChatClient(
-        base_url=os.getenv("AZURE_OPENAI_ENDPOINT"),
-        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-        model=os.getenv("AZURE_OPENAI_MODEL"),
-    )
+    client_kwargs = {
+        "base_url": os.getenv("AZURE_OPENAI_ENDPOINT"),
+        "api_key": os.getenv("AZURE_OPENAI_API_KEY"),
+    }
+    client_sig = inspect.signature(OpenAIChatClient)
+    if "model" in client_sig.parameters:
+        client_kwargs["model"] = os.getenv("AZURE_OPENAI_MODEL")
+    elif "model_id" in client_sig.parameters:
+        client_kwargs["model_id"] = os.getenv("AZURE_OPENAI_MODEL")
+
+    client = OpenAIChatClient(**client_kwargs)
 
     sec_agent = Agent(
         name="SECFilingAnalyst",
@@ -182,69 +186,60 @@ async def run_alpha_audit(ticker: str) -> None:
         ),
     )
 
-    workflow = SequentialBuilder(
-        participants=[sec_agent, news_agent, lead_analyst, auditor],
-        chain_only_agent_responses=True,
-        intermediate_outputs=True,
-    ).build()
-
-    prompt = (
-        f"Analyze {ticker.upper()} and produce an investment audit. "
-        "Ensure the final lead report explicitly considers both SEC filing evidence and current news."
-    )
-
-    stream = workflow.run(prompt, stream=True, include_status_events=True)
     t0 = time.perf_counter()
-    executor_starts: dict[str, float] = {}
-    event_count = 0
-    output_chunk_count = 0
-    output_char_count = 0
 
     print("\n" + "=" * 68)
     print("Step Metadata")
     print("=" * 68)
-    async for event in stream:
-        event_count += 1
-        event_type = str(getattr(event, "type", "unknown"))
 
-        if event_type == "output":
-            chunk = str(getattr(event, "data", "") or "")
-            output_chunk_count += 1
-            output_char_count += len(chunk)
+    base_prompt = (
+        f"Analyze {ticker.upper()} and produce an investment audit. "
+        "Ensure the final lead report explicitly considers both SEC filing evidence and current news."
+    )
 
-            # Emit periodic progress for long generations instead of every token chunk.
-            if output_chunk_count % 50 == 0:
-                progress = {
-                    "seq": event_count,
-                    "event_type": "output_progress",
-                    "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
-                    "output_chunks": output_chunk_count,
-                    "output_chars": output_char_count,
-                }
-                print(json.dumps(progress, default=str))
-            continue
+    sec_report, _ = await _run_agent_step(
+        1,
+        sec_agent,
+        (
+            f"{base_prompt}\n\n"
+            "Focus only on SEC filing evidence and cite which parts are SEC-derived."
+        ),
+        t0,
+    )
 
-        metadata = _event_metadata(event, event_count, t0, executor_starts)
+    news_report, _ = await _run_agent_step(
+        2,
+        news_agent,
+        (
+            f"{base_prompt}\n\n"
+            "Focus only on news/sentiment and near-term business implications."
+        ),
+        t0,
+    )
 
-        data_str = metadata.get("data")
-        if data_str is not None:
-            data_preview = data_str[:220]
-            if len(data_str) > 220:
-                data_preview += "..."
-            metadata["data_preview"] = data_preview
-            metadata.pop("data", None)
+    lead_report, _ = await _run_agent_step(
+        3,
+        lead_analyst,
+        (
+            f"{base_prompt}\n\n"
+            "Use the context below before generating your final report.\n\n"
+            f"SEC EVIDENCE:\n{sec_report}\n\n"
+            f"NEWS EVIDENCE:\n{news_report}"
+        ),
+        t0,
+    )
 
-        print(json.dumps(metadata, default=str))
+    auditor_report, _ = await _run_agent_step(
+        4,
+        auditor,
+        (
+            "Audit the lead report for unsupported claims, weak citations, and logic gaps.\n\n"
+            f"LEAD REPORT:\n{lead_report}"
+        ),
+        t0,
+    )
 
-    print(json.dumps({
-        "event_type": "output_summary",
-        "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
-        "output_chunks": output_chunk_count,
-        "output_chars": output_char_count,
-    }))
-
-    result = await stream.get_final_response()
-    outputs = result.get_outputs()
+    outputs = [sec_report, news_report, lead_report, auditor_report]
 
     print("\n" + "=" * 68)
     print("Workflow Trace")
