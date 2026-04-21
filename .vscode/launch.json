@@ -1,0 +1,36 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Alpha Analyst: Run main.py (TSLA)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/alpha_analyst_rag_hub/main.py",
+      "cwd": "${workspaceFolder}/src/alpha_analyst_rag_hub",
+      "args": [
+        "TSLA"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Alpha Analyst: Run + Open Agent Inspector",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/alpha_analyst_rag_hub/main.py",
+      "cwd": "${workspaceFolder}/src/alpha_analyst_rag_hub",
+      "args": [
+        "TSLA"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      },
+      "preLaunchTask": "Open Agent Inspector"
+    }
+  ]
+}

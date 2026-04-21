@@ -1,42 +1,33 @@
-import os
-import sys
+import asyncio
 import json
-from typing import Annotated
+import os
+import re
+import sys
+import time
+from urllib.parse import quote_plus
+from urllib.request import urlopen
+from xml.etree import ElementTree
+
 from dotenv import load_dotenv
 
-# GA 1.0 Production SDK
-from azure.identity import DefaultAzureCredential
-from azure.ai.projects import AIProjectClient
-from azure.ai.projects.models import (
-    PromptAgentDefinition,
-    FunctionTool,
-    BingGroundingTool,
-    BingGroundingSearchToolParameters,
-    BingGroundingSearchConfiguration,
-    MCPTool # 🏆 The "Truth Tool"
-)
-
-# RAG Infrastructure
-from azure.search.documents import SearchClient
+from agent_framework import Agent, tool
+from agent_framework.openai import OpenAIChatClient
+from agent_framework.orchestrations import SequentialBuilder
 from azure.core.credentials import AzureKeyCredential
+from azure.search.documents import SearchClient
 
-# 1. INITIALIZATION
+
 load_dotenv()
-credential = DefaultAzureCredential()
 
-project_client = AIProjectClient(
-    endpoint=os.getenv("AZURE_AI_PROJECT_ENDPOINT"),
-    credential=credential
-)
 
-# 2. LOCAL RAG TOOL
+@tool(description="Searches internal SEC index for grounded 10-K evidence.")
 def search_sec_index(query: str, ticker: str) -> str:
     """Searches internal SEC index for grounded 10-K data."""
-    print(f"🔍 [SEC RAG]: Searching {ticker.upper()} for '{query}'...")
+    print(f"[tool] search_sec_index ticker={ticker.upper()} query={query}")
     search_client = SearchClient(
         endpoint=os.getenv("AZURE_AI_SEARCH_ENDPOINT"),
         index_name="alpha-analyst-sec-index",
-        credential=AzureKeyCredential(os.getenv("AZURE_AI_SEARCH_KEY"))
+        credential=AzureKeyCredential(os.getenv("AZURE_AI_SEARCH_KEY")),
     )
     try:
         results = search_client.search(
@@ -44,212 +35,231 @@ def search_sec_index(query: str, ticker: str) -> str:
             filter=f"ticker eq '{ticker.upper()}'",
             query_type="semantic",
             semantic_configuration_name="alpha-analyst-config",
-            top=12 
+            top=8,
         )
-        return "\n\n---\n\n".join([r['content'] for r in results]) or "DATA NOT FOUND."
-    except Exception as e:
-        return f"TOOL ERROR: {str(e)}"
+        chunks = [r.get("content", "") for r in results if r.get("content")]
+        return "\n\n---\n\n".join(chunks) if chunks else "DATA NOT FOUND IN SEC INDEX."
+    except Exception as exc:
+        return f"TOOL ERROR: {exc}"
 
-# 3. BING GROUNDING (GA 1.0 Hierarchy)
-# Resolve the Connection ID from the friendly Name
-bing_conn = project_client.connections.get(name=os.getenv("BING_CONNECTION_NAME"))
 
-# 🏆 FIX: project_connection_id is the definitive GA keyword
-search_config = BingGroundingSearchConfiguration(
-    project_connection_id=bing_conn.id
-)
+@tool(description="Fetches recent market news headlines for a ticker from Google News RSS.")
+def get_news_headlines(ticker: str) -> str:
+    """Returns recent headlines and links for a ticker."""
+    print(f"[tool] get_news_headlines ticker={ticker.upper()}")
+    query = quote_plus(f"{ticker} stock earnings guidance risk")
+    url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 
-bing_params = BingGroundingSearchToolParameters(
-    search_configurations=[search_config]
-)
-bing_tool = BingGroundingTool(bing_grounding=bing_params)
+    try:
+        with urlopen(url, timeout=10) as response:
+            xml_data = response.read()
+        root = ElementTree.fromstring(xml_data)
 
-# 4. AGENT DEFINITIONS (Versioning Pattern)
+        entries = []
+        for item in root.findall("./channel/item")[:8]:
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            if title:
+                clean_title = re.sub(r"\s+-\s+[^-]+$", "", title)
+                entries.append(f"- {clean_title} ({link})")
 
-# --- LEAD ANALYST ---
-lead_analyst = project_client.agents.create_version(
-    agent_name="LeadAnalyst",
-    definition=PromptAgentDefinition(
+        if not entries:
+            return f"No recent news headlines found for {ticker.upper()}."
+
+        return "\n".join(entries)
+    except Exception as exc:
+        return f"TOOL ERROR: Unable to fetch news for {ticker.upper()}: {exc}"
+
+
+def _extract_text(output: object) -> str:
+    if isinstance(output, list):
+        parts = [_extract_text(item) for item in output]
+        return "\n\n".join([p for p in parts if p.strip()])
+
+    text = getattr(output, "text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+
+    role = getattr(output, "role", None)
+    msg_content = getattr(output, "content", None)
+    if role is not None and msg_content is not None:
+        rendered = str(msg_content)
+        return f"[{role}] {rendered}"
+
+    content = getattr(output, "content", None)
+    if content is not None:
+        return str(content)
+    return str(output)
+
+
+def _event_metadata(event: object, sequence: int, t0: float, executor_starts: dict[str, float]) -> dict:
+    def _safe_attr(obj: object, name: str):
+        try:
+            return getattr(obj, name)
+        except Exception:
+            return None
+
+    event_type = str(getattr(event, "type", "unknown"))
+    source_executor = _safe_attr(event, "source_executor_id")
+    now = time.perf_counter()
+
+    duration_ms = None
+    if source_executor and event_type == "executor_invoked":
+        executor_starts[source_executor] = now
+    elif source_executor and event_type in {"executor_completed", "executor_failed"}:
+        started = executor_starts.get(source_executor)
+        if started is not None:
+            duration_ms = round((now - started) * 1000, 2)
+
+    metadata = {
+        "seq": sequence,
+        "event_type": event_type,
+        "elapsed_ms": round((now - t0) * 1000, 2),
+        "source_executor_id": source_executor,
+        "request_id": _safe_attr(event, "request_id"),
+        "request_type": str(_safe_attr(event, "request_type") or "") or None,
+        "response_type": str(_safe_attr(event, "response_type") or "") or None,
+        "duration_ms": duration_ms,
+    }
+
+    if event_type == "request_info":
+        try:
+            metadata["request_info"] = event.to_dict()
+        except Exception:
+            metadata["request_info"] = str(_safe_attr(event, "data"))
+    else:
+        metadata["data"] = str(_safe_attr(event, "data"))
+
+    return metadata
+
+
+async def run_alpha_audit(ticker: str) -> None:
+    print(f"\n--- Alpha Analyst Inspector Workflow: {ticker.upper()} ---")
+
+    client = OpenAIChatClient(
+        base_url=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
         model=os.getenv("AZURE_OPENAI_MODEL"),
+    )
+
+    sec_agent = Agent(
+        name="SECFilingAnalyst",
+        client=client,
         instructions=(
-            "You are the lead financial analyst. Build the final investment report by combining "
-            "(1) SEC filing evidence and (2) external news context provided in the user prompt. "
-            "Before finalizing, call search_sec_index to verify key financial claims from filings. "
-            "Output sections: SEC Evidence, News Evidence, Integrated Analysis, and Final Verdict."
+            "You are an SEC filings analyst. Use search_sec_index to gather evidence for revenue, "
+            "cash, profitability, and risk factors. Return only concise evidence bullets with SEC labels."
         ),
-        tools=[
-            FunctionTool(
-                name="search_sec_index",
-                description="Searches internal SEC index for grounded 10-K data.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query text."},
-                        "ticker": {"type": "string", "description": "Stock ticker symbol, e.g. TSLA."}
-                    },
-                    "required": ["query", "ticker"],
-                    "additionalProperties": False
-                },
-                strict=False
-            )
-        ]
+        tools=[search_sec_index],
     )
-)
 
-# --- NEWSAGENT ---
-news_agent = project_client.agents.create_version(
-    agent_name="NewsAgent",
-    definition=PromptAgentDefinition(
-        model=os.getenv("AZURE_OPENAI_MODEL"),
-        instructions="Sentiment: Compare 10-K risks with live Bing News. Flag gaps.",
-        tools=[bing_tool]
-    )
-)
-
-# --- AUDITOR (The MCP Guardian) ---
-auditor = project_client.agents.create_version(
-    agent_name="Auditor",
-    definition=PromptAgentDefinition(
-        model=os.getenv("AZURE_OPENAI_MODEL"),
+    news_agent = Agent(
+        name="NewsAgent",
+        client=client,
         instructions=(
-            "Audit citations and logic. If you are unsure of the current Microsoft "
-            "Agent SDK syntax, use the microsoft_learn_mcp tool to verify."
+            "You are a market news analyst. Use get_news_headlines and summarize sentiment and key "
+            "near-term business implications."
         ),
-        tools=[MCPTool(
-            server_label="microsoft_learn_mcp",
-            server_url="https://learn.microsoft.com/api/mcp"
-        )]
+        tools=[get_news_headlines],
     )
-)
 
-# 5. EXECUTION (Responses API Workflow)
-def run_alpha_audit(ticker: str):
-    print(f"\n--- 🧐 Alpha Analyst Audit: {ticker.upper()} ---")
-    
-    with project_client.get_openai_client() as openai_client:
-        def extract_response_text(response) -> str:
-            if getattr(response, "output_text", None):
-                return response.output_text
+    lead_analyst = Agent(
+        name="LeadAnalyst",
+        client=client,
+        instructions=(
+            "You are the lead analyst. Before generating a report, incorporate both prior SEC evidence "
+            "and prior news analysis from earlier participants. You may call tools again if needed. "
+            "Output sections: SEC Evidence, News Evidence, Integrated Analysis, Final Verdict."
+        ),
+        tools=[search_sec_index, get_news_headlines],
+    )
 
-            parts = []
-            for item in (getattr(response, "output", None) or []):
-                for content in (getattr(item, "content", None) or []):
-                    text_value = getattr(content, "text", None)
-                    if text_value:
-                        parts.append(text_value)
-            return "\n".join(parts).strip()
+    auditor = Agent(
+        name="Auditor",
+        client=client,
+        instructions=(
+            "You are an auditor. Review the lead report for unsupported claims, weak citations, and "
+            "logic gaps. Return a concise audit checklist."
+        ),
+    )
 
-        def invoke_agent(agent, user_prompt: str) -> str:
-            print(f"▶️  Invoking: {agent.name}...")
+    workflow = SequentialBuilder(
+        participants=[sec_agent, news_agent, lead_analyst, auditor],
+        chain_only_agent_responses=True,
+        intermediate_outputs=True,
+    ).build()
 
-            conversation = openai_client.conversations.create(
-                items=[{"role": "user", "content": user_prompt}]
-            )
+    prompt = (
+        f"Analyze {ticker.upper()} and produce an investment audit. "
+        "Ensure the final lead report explicitly considers both SEC filing evidence and current news."
+    )
 
-            response = openai_client.responses.create(
-                conversation=conversation.id,
-                extra_body={
-                    "agent_reference": {"name": agent.name, "type": "agent_reference"}
+    stream = workflow.run(prompt, stream=True, include_status_events=True)
+    t0 = time.perf_counter()
+    executor_starts: dict[str, float] = {}
+    event_count = 0
+    output_chunk_count = 0
+    output_char_count = 0
+
+    print("\n" + "=" * 68)
+    print("Step Metadata")
+    print("=" * 68)
+    async for event in stream:
+        event_count += 1
+        event_type = str(getattr(event, "type", "unknown"))
+
+        if event_type == "output":
+            chunk = str(getattr(event, "data", "") or "")
+            output_chunk_count += 1
+            output_char_count += len(chunk)
+
+            # Emit periodic progress for long generations instead of every token chunk.
+            if output_chunk_count % 50 == 0:
+                progress = {
+                    "seq": event_count,
+                    "event_type": "output_progress",
+                    "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
+                    "output_chunks": output_chunk_count,
+                    "output_chars": output_char_count,
                 }
-            )
+                print(json.dumps(progress, default=str))
+            continue
 
-            while response.status in ["requires_action", "in_progress"]:
-                if response.status == "requires_action":
-                    outputs = []
-                    for tc in response.required_action.submit_tool_outputs.tool_calls:
-                        fn = getattr(tc, "function", None)
-                        fn_name = getattr(fn, "name", None)
+        metadata = _event_metadata(event, event_count, t0, executor_starts)
 
-                        if fn_name == "search_sec_index":
-                            try:
-                                args = json.loads(fn.arguments or "{}")
-                            except json.JSONDecodeError:
-                                args = {}
+        data_str = metadata.get("data")
+        if data_str is not None:
+            data_preview = data_str[:220]
+            if len(data_str) > 220:
+                data_preview += "..."
+            metadata["data_preview"] = data_preview
+            metadata.pop("data", None)
 
-                            query = args.get("query", "latest filing updates")
-                            sec_ticker = args.get("ticker", ticker)
-                            res = search_sec_index(query, sec_ticker)
-                            outputs.append({"tool_call_id": tc.id, "output": res})
-                        else:
-                            outputs.append({
-                                "tool_call_id": tc.id,
-                                "output": f"Tool '{fn_name or 'unknown'}' is not executed by local runner."
-                            })
+        print(json.dumps(metadata, default=str))
 
-                    if outputs:
-                        response = openai_client.responses.submit_tool_outputs(
-                            conversation=conversation.id,
-                            response_id=response.id,
-                            tool_outputs=outputs
-                        )
-                    else:
-                        response = openai_client.responses.get(
-                            conversation=conversation.id,
-                            response_id=response.id
-                        )
-                else:
-                    response = openai_client.responses.get(
-                        conversation=conversation.id,
-                        response_id=response.id
-                    )
+    print(json.dumps({
+        "event_type": "output_summary",
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
+        "output_chunks": output_chunk_count,
+        "output_chars": output_char_count,
+    }))
 
-            final_text = extract_response_text(response)
-            preview = final_text[:150] if final_text else "(no text output)"
-            print(f"[{agent.name}]: {preview}...")
-            return final_text
+    result = await stream.get_final_response()
+    outputs = result.get_outputs()
 
-        def invoke_model(user_prompt: str) -> str:
-            response = openai_client.responses.create(
-                model=os.getenv("AZURE_OPENAI_MODEL"),
-                input=user_prompt
-            )
-            return extract_response_text(response)
+    print("\n" + "=" * 68)
+    print("Workflow Trace")
+    print("=" * 68)
+    for index, item in enumerate(outputs, start=1):
+        message = _extract_text(item)
+        print(f"\n[{index}]\n{message}\n")
 
-        news_summary = invoke_agent(
-            news_agent,
-            (
-                f"For {ticker}, summarize the most material current news and sentiment signals. "
-                "Focus on drivers that may affect revenue, margin, risk, or valuation."
-            )
-        )
+    if outputs:
+        print("=" * 68)
+        print("Final Output")
+        print("=" * 68)
+        print(_extract_text(outputs[-1]))
 
-        sec_snapshot = search_sec_index(
-            "GAAP income cash revenue segment revenue risk factors",
-            ticker
-        )
-
-        lead_prompt = (
-            f"Perform a comprehensive audit of {ticker}. Use SEC filing evidence and incorporate "
-            "the following external news summary before generating your report.\n\n"
-            "REQUIRED: Reference both SEC and News in each conclusion.\n"
-            "Output sections: SEC Evidence, News Evidence, Integrated Analysis, Final Verdict.\n\n"
-            f"SEC EVIDENCE SNAPSHOT:\n{sec_snapshot}\n\n"
-            f"NEWS SUMMARY:\n{news_summary}"
-        )
-
-        lead_report = invoke_agent(lead_analyst, lead_prompt)
-
-        if not lead_report.strip():
-            lead_report = invoke_model(
-                "You are the LeadAnalyst. Produce the final report using BOTH SEC and NEWS context below. "
-                "Cite source type per claim (SEC or NEWS).\n\n"
-                f"{lead_prompt}"
-            )
-
-        auditor_report = invoke_agent(
-            auditor,
-            (
-                f"Audit this lead analyst report for citation quality, unsupported claims, and logic gaps.\n\n"
-                f"LEAD REPORT:\n{lead_report}"
-            )
-        )
-
-        print("\n" + "="*60 + "\n--- 🔬 FINAL LEAD ANALYST REPORT ---\n" + "="*60)
-        print(lead_report)
-
-        print("\n" + "="*60 + "\n--- 🧪 AUDITOR REVIEW ---\n" + "="*60)
-        print(auditor_report)
 
 if __name__ == "__main__":
-    run_alpha_audit(sys.argv[1] if len(sys.argv) > 1 else "TSLA")
+    asyncio.run(run_alpha_audit(sys.argv[1] if len(sys.argv) > 1 else "TSLA"))
     
