@@ -5,6 +5,7 @@
       "name": "Alpha Analyst: Run main.py (TSLA)",
       "type": "debugpy",
       "request": "launch",
+      "python": "${workspaceFolder}/src/alpha_analyst_rag_hub/.venv/bin/python",
       "program": "${workspaceFolder}/src/alpha_analyst_rag_hub/main.py",
       "cwd": "${workspaceFolder}/src/alpha_analyst_rag_hub",
       "args": [

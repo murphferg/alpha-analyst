@@ -1,3 +1,4 @@
 {
-    "github.copilot.chat.githubMcpServer.enabled": true
+    "github.copilot.chat.githubMcpServer.enabled": true,
+    "python.defaultInterpreterPath": "${workspaceFolder}/src/alpha_analyst_rag_hub/.venv/bin/python"
 }

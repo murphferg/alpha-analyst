@@ -15,10 +15,10 @@
     {
       "label": "Run AgentDev Main",
       "type": "shell",
-      "command": "${workspaceFolder}/.agentdev-venv/bin/python -m debugpy --listen 127.0.0.1:5679 -m agentdev run ${workspaceFolder}/src/alpha_analyst_rag_hub/main.py --verbose --port 8088 -- TSLA",
+      "command": "poetry run python -m debugpy --listen 127.0.0.1:5679 -m agentdev run main.py --verbose --port 8088 -- TSLA",
       "isBackground": true,
       "options": {
-        "cwd": "${workspaceFolder}"
+        "cwd": "${workspaceFolder}/src/alpha_analyst_rag_hub"
       },
       "dependsOn": [
         "Validate prerequisites"
