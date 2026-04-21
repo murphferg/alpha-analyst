@@ -171,7 +171,8 @@ async def run_alpha_audit(ticker: str) -> None:
         client=client,
         instructions=(
             "You are the lead analyst. Before generating a report, incorporate both prior SEC evidence "
-            "and prior news analysis from earlier participants. You may call tools again if needed. "
+            "and prior news analysis from earlier participants. Call tools again until you a report with " 
+            "all claims and citations supported and no logic gaps. "
             "Output sections: SEC Evidence, News Evidence, Integrated Analysis, Final Verdict."
         ),
         tools=[search_sec_index, get_news_headlines],
