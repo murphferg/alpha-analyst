@@ -1,185 +1,188 @@
-import asyncio
 import os
+import sys
+import json
 from typing import Annotated
-from xmlrpc import client
-from pydantic import Field
 from dotenv import load_dotenv
 
-# Microsoft Agent Framework 1.0 GA Standard Imports
-from agent_framework import Agent, tool
-from agent_framework.openai import OpenAIChatClient
-from agent_framework.orchestrations import SequentialBuilder
+# GA 1.0 Production SDK
+from azure.identity import DefaultAzureCredential
+from azure.ai.projects import AIProjectClient
+from azure.ai.projects.models import (
+    PromptAgentDefinition,
+    FunctionTool,
+    BingGroundingTool,
+    BingGroundingSearchToolParameters,
+    BingGroundingSearchConfiguration,
+    MCPTool # 🏆 The "Truth Tool"
+)
+
+# RAG Infrastructure
 from azure.search.documents import SearchClient
-from azure.search.documents.models import VectorizedQuery
 from azure.core.credentials import AzureKeyCredential
-from sec_edgar_downloader import Downloader
 
-# Load environment variables
+# 1. INITIALIZATION
 load_dotenv()
+credential = DefaultAzureCredential()
 
-# --- 1. TOOL DEFINITIONS ---
+project_client = AIProjectClient(
+    endpoint=os.getenv("AZURE_AI_PROJECT_ENDPOINT"),
+    credential=credential
+)
 
-@tool(description="Downloads the latest 10-K filing for a company to local storage.")
-def download_sec_filing(
-    ticker: Annotated[str, Field(description="The stock ticker symbol (e.g., 'TSLA')")]
-) -> str:
-    """Uses sec-edgar-downloader to fetch filings for analysis."""
-    # Ensure local directory exists
-    email = "kevin.murphy@example.com" # Replace with your real email for SEC compliance
-    dl = Downloader("AlphaAnalystProject", email, "data/sec_filings")
-    
-    try:
-        dl.get("10-K", ticker.upper(), limit=1)
-        return f"Successfully downloaded the latest 10-K for {ticker.upper()} to data/sec_filings."
-    except Exception as e:
-        return f"Error downloading filing for {ticker}: {str(e)}"
-
-
-@tool(description="Search SEC filings for financial tables.")
+# 2. LOCAL RAG TOOL
 def search_sec_index(query: str, ticker: str) -> str:
-    print(f"🔍 [AGENT CALL]: Searching {ticker} for '{query}'...")
-    
+    """Searches internal SEC index for grounded 10-K data."""
+    print(f"🔍 [SEC RAG]: Searching {ticker.upper()} for '{query}'...")
+    search_client = SearchClient(
+        endpoint=os.getenv("AZURE_AI_SEARCH_ENDPOINT"),
+        index_name="alpha-analyst-sec-index",
+        credential=AzureKeyCredential(os.getenv("AZURE_AI_SEARCH_KEY"))
+    )
     try:
-        # (Existing search logic...)
-        results = client.search(
+        results = search_client.search(
             search_text=query,
-            vector_queries=[vector_query],
             filter=f"ticker eq '{ticker.upper()}'",
             query_type="semantic",
             semantic_configuration_name="alpha-analyst-config",
-            top=10
+            top=12 
         )
-
-        chunks = [r['content'] for r in results]
-        
-        if not chunks:
-            # 🏆 FALLBACK: If semantic fails, try a simple keyword search
-            print(f"⚠️ No semantic results for '{query}'. Trying keyword fallback...")
-            results = client.search(
-                search_text=query,
-                filter=f"ticker eq '{ticker.upper()}'",
-                top=5
-            )
-            chunks = [r['content'] for r in results]
-
-        if not chunks:
-            return f"SYSTEM ERROR: No data found in index for ticker {ticker.upper()} with query '{query}'."
-            
-        return "\n\n---\n\n".join(chunks)
-
+        return "\n\n---\n\n".join([r['content'] for r in results]) or "DATA NOT FOUND."
     except Exception as e:
-            # 🏆 THE SMOKING GUN: Print this to your VS Code terminal
-            print(f"❌ AZURE SEARCH ERROR: {str(e)}")
-            return f"TOOL ERROR: {str(e)}"            
-    
-# --- 2. AGENT DEFINITIONS ---
+        return f"TOOL ERROR: {str(e)}"
 
-async def main():
+# 3. BING GROUNDING (GA 1.0 Hierarchy)
+# Resolve the Connection ID from the friendly Name
+bing_conn = project_client.connections.get(name=os.getenv("BING_CONNECTION_NAME"))
 
-    query = "Analyze Tesla (TSLA) based on indexed risk factors and provide an investment thesis."
-
-    # Initialize the high-performance /v1 Client
-    client = OpenAIChatClient(
-        base_url=os.getenv("AZURE_OPENAI_ENDPOINT"), # Ends in /openai/v1
-        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-        model=os.getenv("AZURE_OPENAI_MODEL")        # Deployment name
-    )
-
-    # Specialist 1: Financial Data & SEC Filings
-    sec_agent = Agent(
-        name="SECAgent",
-        # 🏆 FIX: Explicitly command the agent to use its tools
-        instructions=(
-            "You are an SEC Specialist. When asked about a company, you MUST FIRST use "
-            "'search_sec_index' to look for data. If nothing is found, use 'download_sec_filing'. "
-            "Do not apologize; simply execute the tools and report the findings."
-        ),
-        client=client,
-        tools=[download_sec_filing, search_sec_index]
-    )
-
-    # Specialist 2: News & Sentiment
-    news_agent = Agent(
-        name="NewsAgent",
-        # 🏆 FIX: Give it a baseline tool or clear role
-        instructions="You are a News Analyst. Search for the latest headlines regarding the ticker provided.",
-        client=client
-    )
-
-    # The Supervisor: Coordinates the specialists
-    lead_analyst = Agent(
-        name="LeadAnalyst",
-        instructions=(
-            "You are a Senior Investment Researcher. You are forbidden from using your own memory. "
-            "MISSION: You must find 4 specific metrics: GAAP Income, Cash, Auto Revenue, and Energy Revenue. \n\n"
-            "EXECUTION PLAN:\n"
-            "1. CALL 'search_sec_index' for 'Consolidated Statements of Operations' to find Income.\n"
-            "2. CALL 'search_sec_index' for 'Consolidated Balance Sheets' to find Cash.\n"
-            "3. CALL 'search_sec_index' for 'Segment Revenue' to find Auto/Energy splits.\n"
-            "4. If a search returns SEC headers/boilerplate, RE-SEARCH using more specific terms like 'Table: Operating Income'.\n\n"
-            "Only after you have the numbers, synthesize the Investment Thesis. "
-            "If you fail to find a number, explicitly state: 'DATA NOT FOUND IN INDEX' so the Auditor can see the gap."
-        ),
-        client=client,
-        tools=[search_sec_index]
-    )
-
-    # The Reviewer: A critical auditor to check the final analysis
-    reviewer = Agent(
-    name="Reviewer",
-    instructions=(
-        "You are a cynical Senior Investment Auditor. Your goal is to find errors. "
-        "Review the provided analysis for: \n"
-        "1. Missing Citations: Every financial claim must cite a 10-K section.\n"
-        "2. Hallucinations: Does the news sentiment actually contradict the filing?\n"
-        "3. Logic Gaps: Are the conclusions too optimistic?\n"
-        "If the analysis is weak, provide a list of 'Action Items' for the Analyst."
-    ),
-    client=client
+# 🏆 FIX: project_connection_id is the definitive GA keyword
+search_config = BingGroundingSearchConfiguration(
+    project_connection_id=bing_conn.id
 )
 
-# --- 3. THE WORKFLOW ---
-    
-    # SequentialBuilder connects Analyst -> Reviewer
-    workflow = (
-        SequentialBuilder(participants=[lead_analyst, reviewer])
-        .build()
+bing_params = BingGroundingSearchToolParameters(
+    search_configurations=[search_config]
+)
+bing_tool = BingGroundingTool(bing_grounding=bing_params)
+
+# 4. AGENT DEFINITIONS (Versioning Pattern)
+
+# --- LEAD ANALYST ---
+lead_analyst = project_client.agents.create_version(
+    agent_name="LeadAnalyst",
+    definition=PromptAgentDefinition(
+        model=os.getenv("AZURE_OPENAI_MODEL"),
+        instructions="Researcher: Find GAAP Income, Cash, and Revenue. Cite everything.",
+        tools=[
+            FunctionTool(
+                name="search_sec_index",
+                description="Searches internal SEC index for grounded 10-K data.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query text."},
+                        "ticker": {"type": "string", "description": "Stock ticker symbol, e.g. TSLA."}
+                    },
+                    "required": ["query", "ticker"],
+                    "additionalProperties": False
+                },
+                strict=False
+            )
+        ]
     )
+)
 
-    print("--- 🧐 Alpha Analyst: Sequential Audit Workflow Starting ---")
-    # --- 🛠️ DEBUG: Aggregating all outputs into final_messages ---
-    run_result = await workflow.run(query)
+# --- NEWSAGENT ---
+news_agent = project_client.agents.create_version(
+    agent_name="NewsAgent",
+    definition=PromptAgentDefinition(
+        model=os.getenv("AZURE_OPENAI_MODEL"),
+        instructions="Sentiment: Compare 10-K risks with live Bing News. Flag gaps.",
+        tools=[bing_tool]
+    )
+)
 
-    final_messages = []
-    outputs = run_result.get_outputs()
+# --- AUDITOR (The MCP Guardian) ---
+auditor = project_client.agents.create_version(
+    agent_name="Auditor",
+    definition=PromptAgentDefinition(
+        model=os.getenv("AZURE_OPENAI_MODEL"),
+        instructions=(
+            "Audit citations and logic. If you are unsure of the current Microsoft "
+            "Agent SDK syntax, use the microsoft_learn_mcp tool to verify."
+        ),
+        tools=[MCPTool(
+            server_label="microsoft_learn_mcp",
+            server_url="https://learn.microsoft.com/api/mcp"
+        )]
+    )
+)
 
-    for final_output in outputs:
-        # In Sequential workflows, each participant returns their message history
-        if isinstance(final_output, list):
-            for msg in final_output:
-                final_messages.append(msg)
-        else:
-            # Fallback for single-message responses
-            final_messages.append(final_output)
+# 5. EXECUTION (Responses API Workflow)
+def run_alpha_audit(ticker: str):
+    print(f"\n--- 🧐 Alpha Analyst Audit: {ticker.upper()} ---")
+    
+    with project_client.get_openai_client() as openai_client:
+        for agent in [lead_analyst, news_agent, auditor]:
+            print(f"▶️  Invoking: {agent.name}...")
 
-    # --- 🔦 INSPECTION PRINT ---
-    print("\n" + "="*50)
-    print("--- 🔬 ALPHA ANALYST: FULL CONVERSATION TRACE ---")
-    print("="*50)
+            conversation = openai_client.conversations.create(
+                items=[{"role": "user", "content": f"Perform a comprehensive audit of {ticker}."}]
+            )
+            
+            response = openai_client.responses.create(
+                conversation=conversation.id,
+                extra_body={
+                    "agent_reference": {"name": agent.name, "type": "agent_reference"}
+                }
+            )
 
-    for i, msg in enumerate(final_messages):
-        role = getattr(msg, 'role', 'unknown').upper()
-        name = getattr(msg, 'name', 'System')
-        
-        # 🏆 FIX: Specifically check for Tool/Function outputs
-        if role == "TOOL":
-            # Tool outputs are often in .content or .text depending on the wrapper
-            content = getattr(msg, 'content', getattr(msg, 'text', "[[ EMPTY TOOL RESULT ]]"))
-        else:
-            content = getattr(msg, 'text', str(msg))
-        
-        print(f"[{i}] {role} - {name}:\n{content}\n" + "-"*30)
+            # Polling for Tool Calls (The RAG & MCP loop)
+            while response.status in ["requires_action", "in_progress"]:
+                if response.status == "requires_action":
+                    outputs = []
+                    for tc in response.required_action.submit_tool_outputs.tool_calls:
+                        fn = getattr(tc, "function", None)
+                        fn_name = getattr(fn, "name", None)
 
-    print("--- END OF TRACE ---\n")
+                        if fn_name == "search_sec_index":
+                            try:
+                                args = json.loads(fn.arguments or "{}")
+                            except json.JSONDecodeError:
+                                args = {}
+
+                            query = args.get("query", "latest filing updates")
+                            sec_ticker = args.get("ticker", ticker)
+                            res = search_sec_index(query, sec_ticker)
+                            outputs.append({"tool_call_id": tc.id, "output": res})
+                        else:
+                            # Keep execution moving for non-local tools surfaced as tool calls.
+                            outputs.append({
+                                "tool_call_id": tc.id,
+                                "output": f"Tool '{fn_name or 'unknown'}' is not executed by local runner."
+                            })
+
+                    if outputs:
+                        response = openai_client.responses.submit_tool_outputs(
+                            conversation=conversation.id,
+                            response_id=response.id,
+                            tool_outputs=outputs
+                        )
+                    else:
+                        response = openai_client.responses.get(
+                            conversation=conversation.id,
+                            response_id=response.id
+                        )
+                else:
+                    response = openai_client.responses.get(
+                        conversation=conversation.id, 
+                        response_id=response.id
+                    )
+
+            print(f"[{agent.name}]: {response.output_text[:150]}...")
+
+        print("\n" + "="*60 + "\n--- 🔬 FINAL AUDITED REPORT ---\n" + "="*60)
+        print(response.output_text)
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_alpha_audit(sys.argv[1] if len(sys.argv) > 1 else "TSLA")
+    
