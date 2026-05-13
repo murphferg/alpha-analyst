@@ -58,3 +58,8 @@ nunit-*.xml
 src/alpha_analyst_rag_hub/.env
 
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/

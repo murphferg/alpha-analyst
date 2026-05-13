@@ -1,0 +1,48 @@
+services:
+  gateway:
+    build:
+      context: ./src/AlphaAnalyst.Gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/weatherforecast || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  ingestion:
+    build:
+      context: ./src/AlphaAnalyst.Ingestion
+      dockerfile: Dockerfile
+    environment:
+      - DOTNET_ENVIRONMENT=Production
+
+  rag-hub:
+    build:
+      context: ./src/alpha_analyst_rag_hub
+      dockerfile: Dockerfile
+    environment:
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
+      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}
+      - AZURE_OPENAI_MODEL=${AZURE_OPENAI_MODEL}
+      - AZURE_OPENAI_EMBEDDING_MODEL=${AZURE_OPENAI_EMBEDDING_MODEL}
+      - AZURE_AI_SEARCH_ENDPOINT=${AZURE_AI_SEARCH_ENDPOINT}
+      - AZURE_AI_SEARCH_KEY=${AZURE_AI_SEARCH_KEY}
+    profiles:
+      - full
+
+  vsai:
+    build:
+      context: ./alpha-analyst-vsai
+      dockerfile: Dockerfile
+    ports:
+      - "8088:8088"
+    environment:
+      - PROJECT_ENDPOINT=${PROJECT_ENDPOINT}
+      - MODEL_DEPLOYMENT_NAME=${MODEL_DEPLOYMENT_NAME:-gpt-4.1-mini}
+    profiles:
+      - full
